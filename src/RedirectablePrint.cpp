@@ -1,8 +1,8 @@
 #include "RedirectablePrint.h"
 #include "NodeDB.h"
-#include "RTC.h"
 #include "concurrency/OSThread.h"
 #include "configuration.h"
+#include "gps/RTC.h"
 #include "main.h"
 #include "memGet.h"
 #include "mesh/generated/meshtastic/mesh.pb.h"
@@ -48,10 +48,10 @@ size_t RedirectablePrint::write(uint8_t c)
               // serial port said (which could be zero)
 }
 
-size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_list arg)
+size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_list arg, const char *threadName)
 {
     va_list copy;
-#if ENABLE_JSON_LOGGING || ARCH_PORTDUINO
+#if ARCH_PORTDUINO
     static char printBuf[512];
 #else
     static char printBuf[160];
@@ -78,6 +78,21 @@ size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_l
         if (!std::isprint(static_cast<unsigned char>(printBuf[f])) && printBuf[f] != '\n')
             printBuf[f] = '#';
     }
+    // A message with its own "[Tag] " (the device-ui task has no OSThread)
+    // uses it instead of the thread name, printed uncolored like a real one.
+    size_t tagLen = 0;
+    if (printBuf[0] == '[') {
+        const char *end = (const char *)memchr(printBuf, ']', len < 24 ? len : 24);
+        if (end && (size_t)(end - printBuf) + 1 < len && end[1] == ' ')
+            tagLen = end - printBuf + 2;
+    }
+    if (tagLen)
+        Print::write(printBuf, tagLen);
+    else if (threadName) {
+        Print::write("[", 1);
+        Print::write(threadName, strlen(threadName));
+        Print::write("] ", 2);
+    }
     if (color && logLevel != nullptr) {
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_DEBUG) == 0)
             Print::write("\u001b[34m", 5);
@@ -88,7 +103,7 @@ size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_l
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_ERROR) == 0)
             Print::write("\u001b[31m", 5);
     }
-    len = Print::write(printBuf, len);
+    len = tagLen + Print::write(printBuf + tagLen, len - tagLen);
     if (color && logLevel != nullptr) {
         Print::write("\u001b[0m", 4);
     }
@@ -161,13 +176,8 @@ void RedirectablePrint::log_to_serial(const char *logLevel, const char *format, 
 #endif
     }
     auto thread = concurrency::OSThread::currentThread;
-    if (thread) {
-        print("[");
-        // printf("%p ", thread);
-        // assert(thread->ThreadName.length());
-        print(thread->ThreadName);
-        print("] ");
-    }
+    // the tag is printed by vprintf, which knows whether the formatted
+    // message already carries one of its own
 
 #ifdef DEBUG_HEAP
     // Add heap free space bytes prefix before every log message
@@ -178,7 +188,7 @@ void RedirectablePrint::log_to_serial(const char *logLevel, const char *format, 
 #endif
 #endif // DEBUG_HEAP
 
-    r += vprintf(logLevel, format, arg);
+    r += vprintf(logLevel, format, arg, thread ? thread->ThreadName.c_str() : nullptr);
 }
 
 void RedirectablePrint::log_to_syslog(const char *logLevel, const char *format, va_list arg)
@@ -225,14 +235,16 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
         isBleConnected = nimbleBluetooth && nimbleBluetooth->isActive() && nimbleBluetooth->isConnected();
 #elif defined(ARCH_NRF52)
         isBleConnected = nrf52Bluetooth != nullptr && nrf52Bluetooth->isConnected();
+#elif defined(MESHTASTIC_LINUX_BLE)
+        isBleConnected = linuxBluetooth != nullptr && linuxBluetooth->isEnabled() && linuxBluetooth->isConnected();
 #endif
         if (isBleConnected) {
             auto thread = concurrency::OSThread::currentThread;
             meshtastic_LogRecord logRecord = meshtastic_LogRecord_init_zero;
             logRecord.level = getLogLevel(logLevel);
-            vsprintf(logRecord.message, format, arg);
+            vsnprintf(logRecord.message, sizeof(logRecord.message), format, arg);
             if (thread)
-                strcpy(logRecord.source, thread->ThreadName.c_str());
+                strlcpy(logRecord.source, thread->ThreadName.c_str(), sizeof(logRecord.source));
             logRecord.time = getValidTime(RTCQuality::RTCQualityDevice, true);
 
             auto buffer = std::unique_ptr<uint8_t[]>(new uint8_t[meshtastic_LogRecord_size]);
@@ -241,6 +253,8 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
             nimbleBluetooth->sendLog(buffer.get(), size);
 #elif defined(ARCH_NRF52)
             nrf52Bluetooth->sendLog(buffer.get(), size);
+#elif defined(MESHTASTIC_LINUX_BLE)
+            linuxBluetooth->sendLog(buffer.get(), size);
 #endif
         }
     }
@@ -255,6 +269,9 @@ meshtastic_LogRecord_Level RedirectablePrint::getLogLevel(const char *logLevel)
 {
     meshtastic_LogRecord_Level ll = meshtastic_LogRecord_Level_UNSET; // default to unset
     switch (logLevel[0]) {
+    case 'T':
+        ll = meshtastic_LogRecord_Level_TRACE;
+        break;
     case 'D':
         ll = meshtastic_LogRecord_Level_DEBUG;
         break;
@@ -277,24 +294,22 @@ meshtastic_LogRecord_Level RedirectablePrint::getLogLevel(const char *logLevel)
 void RedirectablePrint::log(const char *logLevel, const char *format, ...)
 {
 
-    // append \n to format
-    size_t len = strlen(format);
-    auto newFormat = std::unique_ptr<char[]>(new char[len + 2]);
-    strcpy(newFormat.get(), format);
-    newFormat[len] = '\n';
-    newFormat[len + 1] = '\0';
-
 #if ARCH_PORTDUINO
     // level trace is special, two possible ways to handle it.
     if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_TRACE) == 0) {
         if (portduino_config.traceFilename != "") {
+            // Format the message rather than assuming the first vararg is a string: not every
+            // LOG_TRACE call passes one, and reading a char* that isn't there segfaults. Sized for
+            // the worst-case packet JSON (233-byte payload escaped 6x, plus metadata ~= 1.7 KB).
+            char traceBuf[2048];
             va_list arg;
             va_start(arg, format);
+            vsnprintf(traceBuf, sizeof(traceBuf), format, arg);
+            va_end(arg);
             try {
-                traceFile << va_arg(arg, char *) << std::endl;
+                traceFile << traceBuf << std::endl;
             } catch (const std::ios_base::failure &e) {
             }
-            va_end(arg);
         }
         if (portduino_config.logoutputlevel < level_trace && strcmp(logLevel, MESHTASTIC_LOG_LEVEL_TRACE) == 0) {
             return;
@@ -312,6 +327,20 @@ void RedirectablePrint::log(const char *logLevel, const char *format, ...)
         return;
     }
 
+    // Append \n here rather than in every call site. A usual-length format is copied on the stack, so logging needs no
+    // heap; an out-of-memory report depends on that. Sized small: some tasks run with well under 1 KB of stack free.
+    size_t len = strlen(format);
+    char stackFormat[96];
+    std::unique_ptr<char[]> heapFormat;
+    char *newFormat = stackFormat;
+    if (len + 2 > sizeof(stackFormat)) {
+        heapFormat.reset(new char[len + 2]);
+        newFormat = heapFormat.get();
+    }
+    memcpy(newFormat, format, len);
+    newFormat[len] = '\n';
+    newFormat[len + 1] = '\0';
+
 #ifdef HAS_FREE_RTOS
     if (inDebugPrint != nullptr && xSemaphoreTake(inDebugPrint, portMAX_DELAY) == pdTRUE) {
 #else
@@ -325,14 +354,14 @@ void RedirectablePrint::log(const char *logLevel, const char *format, ...)
         va_start(arg, format);
 
         va_copy(arg_copy, arg);
-        log_to_serial(logLevel, newFormat.get(), arg_copy);
+        log_to_serial(logLevel, newFormat, arg_copy);
         va_end(arg_copy);
 
         va_copy(arg_copy, arg);
-        log_to_syslog(logLevel, newFormat.get(), arg_copy);
+        log_to_syslog(logLevel, newFormat, arg_copy);
         va_end(arg_copy);
 
-        log_to_ble(logLevel, newFormat.get(), arg);
+        log_to_ble(logLevel, newFormat, arg);
 
         va_end(arg);
 #ifdef HAS_FREE_RTOS
@@ -382,7 +411,6 @@ std::string RedirectablePrint::mt_sprintf(const std::string fmt_str, ...)
     va_list ap;
     while (1) {
         formatted.reset(new char[n]); /* Wrap the plain char array into the unique_ptr */
-        strcpy(&formatted[0], fmt_str.c_str());
         va_start(ap, fmt_str);
         int final_n = vsnprintf(&formatted[0], n, fmt_str.c_str(), ap);
         va_end(ap);

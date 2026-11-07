@@ -3,6 +3,7 @@
 #include "RotaryEncoderImpl.h"
 #include "InputBroker.h"
 #include "RotaryEncoder.h"
+#include "mesh/Throttle.h"
 #ifdef ARCH_ESP32
 #include "sleep.h"
 #endif
@@ -13,7 +14,6 @@ RotaryEncoderImpl *rotaryEncoderImpl;
 
 RotaryEncoderImpl::RotaryEncoderImpl()
 {
-    rotary = nullptr;
 #ifdef ARCH_ESP32
     isFirstInit = true;
 #endif
@@ -23,11 +23,6 @@ RotaryEncoderImpl::~RotaryEncoderImpl()
 {
     LOG_DEBUG("RotaryEncoderImpl destructor");
     detachRotaryEncoderInterrupts();
-
-    if (rotary != nullptr) {
-        delete rotary;
-        rotary = nullptr;
-    }
 }
 
 bool RotaryEncoderImpl::init()
@@ -43,8 +38,9 @@ bool RotaryEncoderImpl::init()
     eventPressed = static_cast<input_broker_event>(moduleConfig.canned_message.inputbroker_event_press);
 
     if (rotary == nullptr) {
-        rotary = new RotaryEncoder(moduleConfig.canned_message.inputbroker_pin_a, moduleConfig.canned_message.inputbroker_pin_b,
-                                   moduleConfig.canned_message.inputbroker_pin_press);
+        rotary.reset(new RotaryEncoder(moduleConfig.canned_message.inputbroker_pin_a,
+                                       moduleConfig.canned_message.inputbroker_pin_b,
+                                       moduleConfig.canned_message.inputbroker_pin_press));
     }
 
     attachRotaryEncoderInterrupts();
@@ -71,8 +67,8 @@ void RotaryEncoderImpl::pollOnce()
 
     static uint32_t lastPressed = millis();
     if (rotary->readButton() == RotaryEncoder::ButtonState::BUTTON_PRESSED) {
-        if (lastPressed + 200 < millis()) {
-            LOG_DEBUG("Rotary event Press");
+        if (Throttle::hasElapsed(lastPressed, 200)) {
+            LOG_INPUT("Rotary event Press");
             lastPressed = millis();
             e.inputEvent = this->eventPressed;
             inputBroker->queueInputEvent(&e);
@@ -81,12 +77,12 @@ void RotaryEncoderImpl::pollOnce()
 
     switch (rotary->process()) {
     case RotaryEncoder::DIRECTION_CW:
-        LOG_DEBUG("Rotary event CW");
+        LOG_INPUT("Rotary event CW");
         e.inputEvent = this->eventCw;
         inputBroker->queueInputEvent(&e);
         break;
     case RotaryEncoder::DIRECTION_CCW:
-        LOG_DEBUG("Rotary event CCW");
+        LOG_INPUT("Rotary event CCW");
         e.inputEvent = this->eventCcw;
         inputBroker->queueInputEvent(&e);
         break;
