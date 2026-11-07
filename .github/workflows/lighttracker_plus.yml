@@ -33,7 +33,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - uses: actions/cache@v4
         with:
@@ -42,18 +42,16 @@ jobs:
             .pio/libdeps
           key: pio-${{ env.PIO_ENV }}-${{ hashFiles('platformio.ini', 'variants/esp32s3/esp32s3.ini', 'variants/esp32/esp32-common.ini') }}
 
-      - run: pip install -U platformio
+      # Same pinned tool versions as upstream CI (an unpinned PlatformIO fails the platform's version check)
+      - run: pip install -r .github/actions/setup-base/requirements.txt
 
       - name: Build
-        run: pio run -e "$PIO_ENV"
+        run: ./bin/build-esp32.sh "$PIO_ENV"
 
       - name: Collect binaries
         run: |
           mkdir -p out
-          cp .pio/build/$PIO_ENV/firmware-*.bin out/ 2>/dev/null || true
-          cp .pio/build/$PIO_ENV/firmware-*.zip out/ 2>/dev/null || true
-          cp .pio/build/$PIO_ENV/firmware-*.mt.json out/ 2>/dev/null || true
-          cp .pio/build/$PIO_ENV/littlefs-*.bin out/ 2>/dev/null || true
+          cp release/*.bin release/*.mt.json release/device-install.* release/device-update.* out/
           ls -la out
 
       - uses: actions/upload-artifact@v4
