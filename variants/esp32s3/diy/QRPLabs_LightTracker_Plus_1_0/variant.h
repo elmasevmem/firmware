@@ -1,69 +1,77 @@
 /*
 
- LightTracker Plus is an ESP32-based development board featuring a 1 Watt SX1268 (433MHz) LoRa module, GPS module, battery holder, and 2 dBi 433 MHz SMA antenna.
+ QRP Labs LightTracker Plus v1.0
+ ESP32-S3 MINI (8 MB flash, no PSRAM) + EBYTE E22-400M30S (SX1268, 433 MHz, 1 W)
+ + Quectel L80 GPS + 0.96" SSD1306 128x64 I2C OLED header.
 
  https://shop.qrp-labs.com/aprs/lighttrackerplus
 
-  Originally developed for LoRa_APRS_iGate and GPIO is same as
-  https://github.com/lightaprs/LightLoRaAPRS/blob/main/variants/light_tracker_plus_v1/variant.h
+ Pins checked against:
+   - lightaprs/LightTracker-Plus-1.0 (All_Modules_Test)
+   - lightaprs/LightLoRaAPRS (variants/light_tracker_plus_v1/variant.h)
+   - richonguzman/LoRa_APRS_Tracker (variants/QRPLabs_LightTracker_Plus_1_0)
 
 */
 
-// OLED (may be different controllers depending on screen size)
+// OLED header (SSD1306 128x64, 0x3C - auto-detected on I2C)
 #define I2C_SDA 3
 #define I2C_SCL 4
 #define HAS_SCREEN 1
 
-// GNSS: Quectel L80RE-M37 (GPS-QZSS) module
-#define GPS_RX_PIN 17
-#define GPS_TX_PIN 18
+// GNSS: Quectel L80 (9600 baud). Pin names are from the ESP32 side:
+// ESP32 RX <- GPIO18 <- GPS TX,  ESP32 TX -> GPIO17 -> GPS RX
+#define GPS_RX_PIN 18
+#define GPS_TX_PIN 17
+#define GPS_BAUDRATE 9600
+// GPS power goes through a PNP high-side switch: LOW = GPS on, HIGH = GPS off
 #define PIN_GPS_EN 33
+#define GPS_EN_ACTIVE LOW
 
+// Button (BOOT, GPIO0, active low)
+#define BUTTON_PIN 0
 
-// Button
-#define BUTTON_PIN 0 // Left side button - if not available, set device.button_gpio to 0 from Meshtastic client
+// User LED (GPIO16, active high)
+#define LED_POWER 16
 
-// LEDs
-#define LED_POWER 16 // Tx LED
-
-// Battery sense
+// Battery sense: GPIO1 through a 560k / 100k divider -> (560 + 100) / 100 = 6.6
+// Fine-tune from the app with Power > ADC multiplier override if the reading is off.
 #define BATTERY_PIN 1
-#define ADC_MULTIPLIER 5.65
-#define ADC_CHANNEL ADC1_CHANNEL_0
-#define BATTERY_SENSE_RESOLUTION_BITS ADC_RESOLUTION
+#define ADC_MULTIPLIER 6.6
 #define ADC_REFERENCE REF_3V3
+#define ADC_CHANNEL ADC_CHANNEL_0 // GPIO1 = ADC1_CH0
+#define BATTERY_SENSE_RESOLUTION_BITS ADC_RESOLUTION
 
-// SPI
+// SPI (LoRa)
 #define LORA_SCK 12
 #define LORA_MISO 13
 #define LORA_MOSI 11
-
-// LoRa
 #define LORA_CS 10
-#define LORA_DIO0 5          // a No connect on the SX1262/SX1268 module
-#define LORA_RESET 9         // RST for SX1276, and for SX1262/SX1268
-#define LORA_DIO1 5          // IRQ for SX1262/SX1268
-#define LORA_DIO2 RADIOLIB_NC // BUSY for SX1262/SX1268
-#define LORA_DIO3             // NC, but used as TCXO supply by E22 module
-#define LORA_RXEN 42          // RF switch RX (and E22 LNA) control by ESP32 GPIO
-#define LORA_TXEN 14          // RF switch TX (and E22 PA) control by ESP32 GPIO
 
+// LoRa: EBYTE E22-400M30S (SX1268)
+#define USE_SX1268
+#define LORA_RESET 9
+#define LORA_DIO1 5 // SX126x IRQ
+#define LORA_DIO2 6 // SX126x BUSY
 
-// common pinouts for SX126X modules
-#define SX126X_CS 10
+#define SX126X_CS LORA_CS
 #define SX126X_DIO1 LORA_DIO1
 #define SX126X_BUSY LORA_DIO2
 #define SX126X_RESET LORA_RESET
-#define SX126X_RXEN LORA_RXEN
-#define SX126X_TXEN LORA_TXEN
+// E22 RF switch is driven by the ESP32 (DIO2 is not wired to it)
+#define SX126X_RXEN 42
+#define SX126X_TXEN 14
+// E22 module power switch (HIGH = on)
 #define SX126X_POWER_EN 21
 
-#define USE_SX1268
-#define SX126X_MAX_POWER 22
-
-// E22 TCXO support
-#ifdef EBYTE_E22
+// E22 uses a 1.8 V TCXO on DIO3
 #define SX126X_DIO3_TCXO_VOLTAGE 1.8
-#define TCXO_OPTIONAL // make it so that the firmware can try both TCXO and XTAL
+#define TCXO_OPTIONAL // also try XTAL if the TCXO init fails
 
+// E22-400M30S: ~30 dBm out with the SX1268 at 22 dBm. Same PA stage as the E22-900M30S,
+// so use the same gain; the app then shows the real antenna-port power.
+#ifndef TX_GAIN_LORA
+#define TX_GAIN_LORA 7
+#endif
+#ifndef SX126X_MAX_POWER
+#define SX126X_MAX_POWER 22
 #endif

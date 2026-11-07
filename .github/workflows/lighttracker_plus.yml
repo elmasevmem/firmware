@@ -1,0 +1,73 @@
+name: LightTracker Plus
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "src/**"
+      - "variants/esp32s3/diy/QRPLabs_LightTracker_Plus_1_0/**"
+      - "variants/esp32s3/esp32s3.ini"
+      - "boards/QRPLabs_LightTracker_Plus_1_0.json"
+      - "platformio.ini"
+      - ".github/workflows/lighttracker_plus.yml"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        type: string
+        required: false
+        description: Release tag to publish (e.g. lt-v1). Leave blank to only build.
+
+permissions:
+  contents: write
+
+env:
+  PIO_ENV: QRPLabs_LightTracker_Plus_1_0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio/libdeps
+          key: pio-${{ env.PIO_ENV }}-${{ hashFiles('platformio.ini', 'variants/esp32s3/esp32s3.ini', 'variants/esp32/esp32-common.ini') }}
+
+      - run: pip install -U platformio
+
+      - name: Build
+        run: pio run -e "$PIO_ENV"
+
+      - name: Collect binaries
+        run: |
+          mkdir -p out
+          cp .pio/build/$PIO_ENV/firmware-*.bin out/ 2>/dev/null || true
+          cp .pio/build/$PIO_ENV/firmware-*.zip out/ 2>/dev/null || true
+          cp .pio/build/$PIO_ENV/firmware-*.mt.json out/ 2>/dev/null || true
+          cp .pio/build/$PIO_ENV/littlefs-*.bin out/ 2>/dev/null || true
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshtastic-lighttracker-plus
+          path: out/*
+
+      - name: Publish release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release create "$TAG" out/* \
+            --target "$GITHUB_SHA" \
+            --title "Meshtastic LightTracker Plus $TAG" \
+            --notes "Meshtastic firmware for QRP Labs LightTracker Plus v1.0 (ESP32-S3 + E22-400M30S). Flash firmware-*.factory.bin at 0x0 for a fresh install, or use the update .bin from an existing Meshtastic install."
