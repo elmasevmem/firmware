@@ -45,6 +45,16 @@ jobs:
       # Same pinned tool versions as upstream CI (an unpinned PlatformIO fails the platform's version check)
       - run: pip install -r .github/actions/setup-base/requirements.txt
 
+      # The ESP32 platform builds its own venv (~/.platformio/penv) with "pioarduino>=6.2.0".
+      # pioarduino 6.2.0.post1 reports itself as 6.2.0-post.1, which fails the same platform's
+      # ">=6.2.0" engine check in the second (Arduino) build pass. Pre-create the venv with 6.2.0;
+      # the platform only installs packages that are missing or don't satisfy the spec.
+      - name: Pin pioarduino core in the platform venv
+        run: |
+          python -m venv ~/.platformio/penv
+          ~/.platformio/penv/bin/pip install -q "pioarduino==6.2.0"
+          ~/.platformio/penv/bin/pio --version
+
       - name: Build
         run: ./bin/build-esp32.sh "$PIO_ENV"
 
